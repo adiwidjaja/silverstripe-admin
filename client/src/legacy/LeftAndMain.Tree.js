@@ -438,7 +438,7 @@ $.entwine('ss.tree', function($){
                 // This can happen for deep trees which require ajax loading.
                 // Assumes that the new node has been submitted to the server already.
                 if (nodeData.ParentID && !self.find('li[data-id=' + nodeData.ParentID + ']').length) {
-                  self.jstree('load_node', -1);
+                  self.jstree('load_node', -1, $.noop, $.noop);
                 } else {
 
                   self.createNode(nodeData.html, nodeData, (node) => {
