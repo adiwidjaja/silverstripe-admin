@@ -274,6 +274,71 @@ $.entwine('ss.tree', function($){
     },
 
     /**
+     * Opens ancestors of the given node and selects it in the tree.
+     * Unlike reopen, this only opens the direct ancestor chain,
+     * avoiding AJAX re-fetches that can duplicate nodes.
+     */
+    expandTreeAndSelect: function(node) {
+      if (!node.length) {
+        return;
+      }
+      var self = this;
+      this.jstree('deselect_all');
+      // Open each closed ancestor so the target becomes visible.
+      // Since these nodes already have children in the DOM (from load_node),
+      // open_node won't trigger additional AJAX requests.
+      node.parents('li.jstree-closed').each(function() {
+        self.jstree('open_node', this, false, true);
+      });
+      this.jstree('select_node', node);
+    },
+
+    /**
+     * Recursively ensures that the given node is visible in the tree
+     * by walking up the ancestor chain until finding a loaded ancestor,
+     * then opening each level back down via AJAX child loading.
+     *
+     * This avoids using load_node(-1) which replaces the entire tree
+     * and loses deeply nested nodes when node_threshold_total is low.
+     *
+     * Parameters:
+     *  (Int) nodeId - The ID of the node to make visible
+     *  (Function) callback - Called when the node is in the DOM
+     *  (Int) depth - Recursion depth guard (internal)
+     */
+    openToNode: function(nodeId, callback, depth) {
+      depth = depth || 0;
+      if (depth > 25) { if (callback) callback(); return; }
+      var self = this;
+      var existingNode = self.find('li[data-id=' + nodeId + ']');
+      if (existingNode.length) {
+        if (callback) callback();
+        return;
+      }
+      // Node not in tree - fetch its data to learn its parent
+      $.ajax({
+        url: $.path.addSearchParams(self.data('urlUpdatetreenodes'), 'ids=' + nodeId),
+        dataType: 'json',
+        success: function(data) {
+          var nd = data[nodeId];
+          if (!nd || !nd.ParentID) { if (callback) callback(); return; }
+          // Recursively ensure ancestors are open
+          self.openToNode(nd.ParentID, function() {
+            var parentNode = self.find('li[data-id=' + nd.ParentID + ']');
+            if (parentNode.length) {
+              // Open parent which AJAX-loads its children (including our target)
+              self.jstree('open_node', parentNode, function() {
+                if (callback) callback();
+              });
+            } else {
+              if (callback) callback();
+            }
+          }, depth + 1);
+        }
+      });
+    },
+
+    /**
      * Creates a new node from the given HTML.
      * Wrapping around jstree API because we want the flexibility to define
      * the node's <li> ourselves. Places the node in the tree
@@ -421,6 +486,7 @@ $.entwine('ss.tree', function($){
           dataType: 'json',
           success: function (data, xhr) {
             resolve(data);
+            var didAsyncLoad = false;
             $.each(data, function (nodeId, nodeData) {
               var node = self.getNodeByID(nodeId);
 
@@ -433,26 +499,23 @@ $.entwine('ss.tree', function($){
               // Check if node exists, create if necessary
               if (node.length) {
                 self.updateNode(node, nodeData.html, nodeData);
-              } else {
-                // If the parent node can't be found, it might have not been loaded yet.
-                // This can happen for deep trees which require ajax loading.
-                // Assumes that the new node has been submitted to the server already.
-                if (nodeData.ParentID && !self.find('li[data-id=' + nodeData.ParentID + ']').length) {
-                  self.jstree('load_node', -1, $.noop, $.noop);
-                } else {
-
-                  self.createNode(nodeData.html, nodeData, (node) => {
-                    // If there's no currently selected node and we're only updating 1
-                    // node, assume we want that node selected
-                    if (!selected.length && ids.length === 1) {
-                      selected = node;
-                    }
-                  });
-                }
+              } else if (nodeData.ParentID) {
+                // Node not in tree. Recursively walk up ancestor chain
+                // until finding a loaded ancestor, then open each level down.
+                // This avoids load_node(-1) which collapses the entire tree
+                // and loses deep nodes when node_threshold_total is low.
+                didAsyncLoad = true;
+                self.openToNode(nodeId, function() {
+                  var targetNode = self.find('li[data-id=' + nodeId + ']');
+                  self.expandTreeAndSelect(targetNode);
+                });
               }
             });
 
-            if (selected.length) {
+            // Only handle selection here if no async load was triggered.
+            // When async operations are in flight, their callbacks handle selection
+            // to avoid operating on stale DOM references.
+            if (!didAsyncLoad && selected.length) {
               self.jstree('deselect_all');
               self.jstree('reopen');
               self.jstree('select_node', selected);
